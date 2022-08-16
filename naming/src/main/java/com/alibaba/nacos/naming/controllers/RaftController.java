@@ -86,7 +86,7 @@ public class RaftController {
     
     /**
      * Raft vote api.
-     *
+     * 选举
      * @param request  http request
      * @param response http response
      * @return peer information
@@ -104,7 +104,7 @@ public class RaftController {
     
     /**
      * Beat api.
-     *
+     * 心跳
      * @param request  http request
      * @param response http response
      * @return peer information
@@ -128,6 +128,7 @@ public class RaftController {
     
     /**
      * Get peer information.
+     * 获取节点信息
      *
      * @param request  http request
      * @param response http response

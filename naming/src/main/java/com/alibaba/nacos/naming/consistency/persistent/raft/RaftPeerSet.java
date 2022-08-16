@@ -219,12 +219,24 @@ public class RaftPeerSet extends MemberChangeListener implements Closeable {
 
     /**
      * Set leader as new candidate.
+     * 设置本节点上的各个节点的状态，防止缓存里面的节点不一致：
+     *     同步设置本地缓存中的leader为远程的发起心跳的leader，防止出现多个leader情况
+     *     流程如下：
+     *         1.获取本地所有除发送心跳的leader节点，还是leader的节点
+     *               此问题会在leader切换时发生
+     * *       2.调用其他leader节点的 /v1/ns/raft/peer 获取此点的最新状态
+     * *       3.如果leader异常了：则将缓存中的 leader 状态设置为 follower，
+     * *       4.如果节点没有异常，则直接更新此节点的状态
+     * *       5.更新远程leader状态
      *
      * @param candidate new candidate
      * @return new leader
      */
     public RaftPeer makeLeader(RaftPeer candidate) {
+
+        // 本地leader 不是远程leader
         if (!Objects.equals(leader, candidate)) {
+            // 更新本地远程leader 为本地leader
             leader = candidate;
             ApplicationUtils.publishEvent(new MakeLeaderEvent(this, leader, local()));
             Loggers.RAFT
@@ -232,14 +244,20 @@ public class RaftPeerSet extends MemberChangeListener implements Closeable {
                             JacksonUtils.toJson(leader));
         }
 
+        //
         for (final RaftPeer peer : peers.values()) {
             Map<String, String> params = new HashMap<>(1);
+
+            // 1.获取本地所有除发送心跳的leader节点，还是leader的节点
             if (!Objects.equals(peer, candidate) && peer.state == RaftPeer.State.LEADER) {
                 try {
+
+                    // 2.调用其他leader节点的 /v1/ns/raft/peer 获取此点的最新状态
                     String url = RaftCore.buildUrl(peer.ip, RaftCore.API_GET_PEER);
                     HttpClient.asyncHttpGet(url, null, params, new Callback<String>() {
                         @Override
                         public void onReceive(RestResult<String> result) {
+                            // 3.如果leader异常了：则将缓存中的 leader 状态设置为 follower，
                             if (!result.ok()) {
                                 Loggers.RAFT
                                         .error("[NACOS-RAFT] get peer failed: {}, peer: {}", result.getCode(), peer.ip);
@@ -247,6 +265,7 @@ public class RaftPeerSet extends MemberChangeListener implements Closeable {
                                 return;
                             }
 
+                            // 4.如果节点没有异常，则直接更新此节点的状态
                             update(JacksonUtils.toObj(result.getData(), RaftPeer.class));
                         }
 
@@ -267,6 +286,7 @@ public class RaftPeerSet extends MemberChangeListener implements Closeable {
             }
         }
 
+        // 5.更新远程leader状态
         return update(candidate);
     }
 
