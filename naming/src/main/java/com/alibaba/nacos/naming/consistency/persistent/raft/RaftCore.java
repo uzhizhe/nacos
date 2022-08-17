@@ -563,16 +563,16 @@ public class RaftCore implements Closeable {
 
     /**
      * Received vote.
-     *
+     * <p>
      * 投票逻辑：
-     *    如果发起选举的节点任期小于等于本地任期时：
-     *        如果本地没有参与投票，就投自己；
-     *        如果参与过投票，将票投给之前投的人；
-     *        这样就保证了谁先来就投谁，并且此方法是线程同步方法，保证了并发，
-     *        不会出现两个候选人过来后，投票结果不一致的情况。
-     *        保证选举时，可以选举出来 Leader
-     *    如果发起投票节点的任期大于本地节点时：
-     *        本地节点设置为 Follower，将选票投给远程节点
+     * 如果发起选举的节点任期小于等于本地任期时：
+     * 如果本地没有参与投票，就投自己；
+     * 如果参与过投票，将票投给之前投的人；
+     * 这样就保证了谁先来就投谁，并且此方法是线程同步方法，保证了并发，
+     * 不会出现两个候选人过来后，投票结果不一致的情况。
+     * 保证选举时，可以选举出来 Leader
+     * 如果发起投票节点的任期大于本地节点时：
+     * 本地节点设置为 Follower，将选票投给远程节点
      *
      * @param remote remote raft peer of vote information
      * @return self-peer information
@@ -803,7 +803,7 @@ public class RaftCore implements Closeable {
         local.resetLeaderDue();
         local.resetHeartbeatDue();
 
-        // 设置本地Leader, 在发生新老Leader切换时
+        // 在发生新老Leader切换时，更新本地所有节点的选票信息
         peers.makeLeader(remote);
 
         if (!switchDomain.isSendBeatOnly()) {
@@ -849,6 +849,7 @@ public class RaftCore implements Closeable {
                         continue;
                     }
 
+                    // 本地没有缓存时，新增
                     if (!(datums.containsKey(datumKey) && datums.get(datumKey).timestamp.get() >= timestamp)) {
                         batch.add(datumKey);
                     }
@@ -868,6 +869,8 @@ public class RaftCore implements Closeable {
                             processedCount, beatDatums.size(), datums.size());
 
                     // update datum entry
+                    // API_GET: /v1/ns/raft/datum
+                    // 从远程Leader 节点中获取对应数据
                     String url = buildUrl(remote.ip, API_GET);
                     Map<String, String> queryParam = new HashMap<>(1);
                     queryParam.put("keys", URLEncoder.encode(keys, "UTF-8"));
@@ -882,13 +885,18 @@ public class RaftCore implements Closeable {
                                     .toObj(result.getData(), new TypeReference<List<JsonNode>>() {
                                     });
 
+                            // 遍历请求到的数据
                             for (JsonNode datumJson : datumList) {
                                 Datum newDatum = null;
+
+                                // 加锁
                                 OPERATE_LOCK.lock();
                                 try {
 
+                                    // 本地数据
                                     Datum oldDatum = getDatum(datumJson.get("key").asText());
 
+                                    // 本地数据未发生变化，不进行同步
                                     if (oldDatum != null && datumJson.get("timestamp").asLong() <= oldDatum.timestamp
                                             .get()) {
                                         Loggers.RAFT
@@ -898,6 +906,7 @@ public class RaftCore implements Closeable {
                                         continue;
                                     }
 
+                                    // 同步信息
                                     if (KeyBuilder.matchServiceMetaKey(datumJson.get("key").asText())) {
                                         Datum<Service> serviceDatum = new Datum<>();
                                         serviceDatum.key = datumJson.get("key").asText();
@@ -921,9 +930,13 @@ public class RaftCore implements Closeable {
                                         continue;
                                     }
 
+                                    // 写入本地文件
                                     raftStore.write(newDatum);
 
+                                    // 更新本地缓存
                                     datums.put(newDatum.key, newDatum);
+
+                                    // 通知监听数据变化的 listener
                                     notifier.notify(newDatum.key, DataOperation.CHANGE, newDatum.value);
 
                                     local.resetLeaderDue();
@@ -935,6 +948,7 @@ public class RaftCore implements Closeable {
                                         local.term.addAndGet(100);
                                     }
 
+                                    // 更新本地存储的任期
                                     raftStore.updateTerm(local.term.get());
 
                                     Loggers.RAFT.info("data updated, key: {}, timestamp: {}, from {}, local term: {}",
@@ -976,6 +990,7 @@ public class RaftCore implements Closeable {
 
             }
 
+            // 过滤出已经不需要维护的数据：leader 没有，本地有的数据
             List<String> deadKeys = new ArrayList<>();
             for (Map.Entry<String, Integer> entry : receivedKeysMap.entrySet()) {
                 if (entry.getValue() == 0) {
@@ -983,6 +998,7 @@ public class RaftCore implements Closeable {
                 }
             }
 
+            // 删除已经不需要维护的数据：leader 没有，本地有的数据
             for (String deadKey : deadKeys) {
                 try {
                     deleteDatum(deadKey);
